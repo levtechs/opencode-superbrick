@@ -10,7 +10,7 @@ export interface CameraState { position: number[]; target: number[]; ortho?: boo
 export type ViewName = "front" | "top" | "right" | "iso";
 
 /** SuperBrick's dark viewport colour. */
-export const VIEWPORT_BG = "#2b3036";
+export const VIEWPORT_BG = "#252a2e";
 
 export function disposeObject(object: Object3D): void {
   const materials = new Set<Material>();
