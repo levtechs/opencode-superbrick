@@ -1,45 +1,55 @@
-# SuperBrick companion for OpenCode
+# SuperBrick for opencode
 
-A local OpenCode Desktop plugin with an orbitable LEGO viewport, live SuperBrick proposals, actual agent/tool activity, and generated-file previews. **No SuperBrick modifications or agent-workflow changes required.**
+Watch an agent build LEGO models in [opencode](https://opencode.ai) Desktop. This plugin puts a
+live 3D view of the agent's [SuperBrick](https://github.com/levtechs/SuperBrick) project, its
+tool activity and its proposals beside the chat, so you can review and accept its work without
+leaving opencode.
 
-## Use
+<!-- demo-video -->
+<p align="center">
+  <a href="https://github.com/levtechs/SuperBrick/releases/download/v0.2.0/superbrick-opencode-demo.mp4">
+    <img src="docs/images/demo-poster.jpg" alt="Watch the SuperBrick + opencode demo" width="800">
+  </a>
+</p>
+<!-- /demo-video -->
 
-1. Open a session's side-panel **+ → SuperBrick**, or run **SuperBrick: watch build** from the command palette.
-2. Click **Project**, choose the exact `.sb` project, and set **Builder** to the identity used by `sb --user …` (for the existing Claude setup, `claude`). Click **Connect**.
-3. Choose **Accepted main**, **Builder**, or **Generated • not proposed**. Drag to orbit, right-drag to pan, scroll to zoom. Ordinary model updates preserve the camera.
-4. Optionally choose a run folder to follow `.ldr`/`.mpd` files and renders generated before proposals reach SuperBrick. Pick a specific model in **Artifacts**, or leave the generated-file field empty to follow the newest model.
+![The plugin beside an opencode chat: the agent's Starship build, verified legal](docs/images/plugin.jpg)
 
-Bindings are persisted separately for each OpenCode server/session. The full canonical project path is available in the path row's tooltip and Project settings; same-named projects in different folders are not interchangeable.
+> **Requires the SuperBrick app.** The agent builds through SuperBrick's MCP server, and this
+> plugin reads the same `.sb` project. [Download SuperBrick](https://github.com/levtechs/SuperBrick/releases/latest)
+> first and connect its MCP server to opencode (`sb mcp --user <agent name>`).
 
-### Proposals and safety
+## What it does
 
-- Selection and explicit confirmation are required for accept/reject. Reject supports feedback notes; “Ask agent” only inserts text into the composer.
-- Decisions are disabled while the native SuperBrick editor holds this project's lease. Its current conflict fallback can overwrite external changes. Close that project in SuperBrick before deciding here, and **do not open it or run another human writer while saving**. This guard is not an atomic cross-process lock.
-- Proposals remain separate per builder. The viewport never merges all agents' drafts into an invented authoritative model.
-- A generated preview is **not yet proposed**. Viewing it does not import, approve, or validate anything.
-- Validation results remain in the original tool conversation/artifacts. Successful execution, missing error overlays, and rendered geometry are not proof of build legality.
-- Live cloud-synced SQLite projects are rejected; use local project storage.
+- **Follows the agent.** The panel connects itself to the newest `.sb` project the agent's
+  tools mention, or pick one with **Project**.
+- **3D view.** Drag to orbit, right-drag to pan, scroll to zoom; a view cube jumps to the
+  standard views. **Accepted** shows only accepted pieces, **Builder** adds the agent's open
+  proposals, and **Generated** previews an `.ldr`/`.mpd` the agent wrote but hasn't proposed.
+- **Proposals.** Accept, reject (with a note the agent sees), or **Ask** the agent about one in
+  the chat. Accepting a proposal also accepts the ones it builds on.
+- **Activity.** Live SuperBrick tool calls from the agent and its sub-agents, with timings,
+  plus the renders and models it produced.
+- **Open in app** opens the project in SuperBrick for real editing.
 
-### Activity and limitations
+This is a viewer that uses Three.js and the LDraw library, so it can look a little different
+from SuperBrick, and it can't edit pieces. A clean picture isn't proof that the build is
+legal; SuperBrick's `verify` is the checker.
 
-The server plugin captures real tool start/finish/error events, including descendant-agent sessions. The panel also shows background task labels and discovers local model/render paths from tool inputs/results. It does not fabricate placement animation or progress percentages. If an agent generates an entire model externally and imports it at the end, the preview changes only when the generated file or project actually changes.
+## Install
 
-Activity is bounded, in-memory, and starts when this plugin loads; it is not a replay of older session history. Ordinary external PNG/JPEG/WebP artifacts are shown from the selected run folder or discovered tool paths. Some tools' inline images may not be exposed in the standard tool-result format.
-
-This is a **viewer, not the native editor embedded**. It uses Three.js and the installed LDraw library, so appearance can differ from SuperBrick. There is no stable-ID brick picking, native editor panel, remote-project support, or new agent orchestration/MCP routing. The builder setting does not change the agent's MCP identity.
-
-## Install / develop
-
-Targets OpenCode **2.2.5** and its experimental GUI plugin API. Requires Node 20.19+/22.12+, installed SuperBrick, Python 3 (standard `sqlite3` module), and the same local LDraw ZIP/extras used by SuperBrick.
+Needs opencode Desktop **2.2.5** (its experimental GUI plugin API), Node 20.19+ or 22.12+,
+SuperBrick, and Python 3.
 
 ```sh
+git clone https://github.com/levtechs/opencode-superbrick
+cd opencode-superbrick
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci
-npm run check
-npm test
 npm run build
 ```
 
-Add this package's absolute directory to the **global** `~/.config/opencode/opencode.jsonc` `plugins` array, preserving existing entries:
+Add the folder to the `plugins` array in `~/.config/opencode/opencode.jsonc`, keeping any
+existing entries:
 
 ```jsonc
 {
@@ -47,26 +57,48 @@ Add this package's absolute directory to the **global** `~/.config/opencode/open
 }
 ```
 
-OpenCode watches plugin configuration. `npm run dev` watches/rebuilds the GUI bundle. Server-source changes require reloading the server plugin, not just rebuilding the GUI. Settings → Extensions → Plugins controls GUI enablement.
+In a session, open the side panel's **+ → SuperBrick**, or run **SuperBrick: watch build** from
+the command palette. **Settings → Extensions → Plugins** turns the panel on or off.
 
-Optional environment overrides (inherited by OpenCode Desktop):
+### Settings
 
-- `SUPERBRICK_PLUGIN_SB`: installed `sb` executable.
-- `SUPERBRICK_PLUGIN_PYTHON`: Python executable.
-- `SUPERBRICK_PLUGIN_LIBRARY`: LDraw ZIP.
-- Existing `SB_LDRAW_ZIP`, `BENCH_LDRAW_ZIP`, `BENCH_LDRAW_EXTRA`, `SB_SUPPORT_DIR` and `SB_NO_LEOCAD` library conventions are respected.
+- **Builder** is the agent's `sb --user` name (for example `claude`); it picks whose proposals
+  you see.
+- **Run folder** is optional: a folder to watch for models and renders the agent writes before
+  proposing them.
+- Settings are kept per opencode session.
 
-`npm run preview` runs a development-only browser harness at `http://127.0.0.1:4318` with a **temporary fixture**, not your project. It disables native launching and human decisions. Stop with Ctrl+C to clean up.
+Keep projects out of iCloud Drive and other synced folders; the plugin refuses them because
+syncing a live SQLite file can corrupt it.
 
-## Architecture
+While SuperBrick has the same project open for editing, accept and reject are turned off here.
+Close the project in SuperBrick first.
 
-- `src/server.ts`, `activity.ts`, `rpc.ts`: bounded tool activity and parent-session aggregation; no new agent tools or instructions.
-- `src/main.ts`, `contract.ts`: typed desktop main/window IPC, per-session settings, native chooser and installed-app launching.
-- `src/backend/project.ts`: short read-only SQLite snapshots including WAL, without consuming agent feedback or camera preferences.
-- `src/backend/build.ts`: file watchers plus reconciliation, coalesced exports, stale-result rejection, guarded explicit decisions.
-- `src/backend/library.ts`: lazy local ZIP lookup and self-contained MPD packing; no HTTP part downloads.
-- `src/viewport.ts`, `panel.tsx`: interactive Three.js viewport and Solid UI.
+### Environment overrides
 
-Existing `sb PROJECT --user BUILDER export -o …` provides the builder's effective model without calling the agent tool dispatcher or consuming decision notifications. Initializing that existing export path can initialize observation hashes; it is not a new strictly read-only SuperBrick API. Accepted-only export avoids that path. All temporary exports belong to the plugin and are removed when their session view closes.
+`SUPERBRICK_PLUGIN_SB` (the `sb` executable), `SUPERBRICK_PLUGIN_PYTHON`,
+`SUPERBRICK_PLUGIN_LIBRARY` (LDraw zip). SuperBrick's own `SB_LDRAW_ZIP`, `BENCH_LDRAW_ZIP`,
+`BENCH_LDRAW_EXTRA`, `SB_SUPPORT_DIR` and `SB_NO_LEOCAD` are respected too.
 
-Tests use temporary SQLite/SuperBrick projects only: WAL visibility, unchanged feedback preferences, proposal guards, accepted/builder exports, real explicit reject/accept, generated refresh, MPD/subpart loading without network, artifact extraction and child-agent activity.
+## Development
+
+```sh
+npm run check     # type-check
+npm test          # build, then unit and integration tests on temporary projects
+npm run dev       # rebuild the GUI bundle on change
+npm run preview   # browser harness at http://127.0.0.1:4318 with a temporary fixture project
+```
+
+Server-side changes need the opencode server plugin reloaded, not just a GUI rebuild.
+
+| File | What |
+|---|---|
+| `src/server.ts`, `activity.ts`, `rpc.ts` | tool activity, including sub-agent sessions |
+| `src/main.ts`, `contract.ts` | desktop main-process IPC, per-session settings, launching SuperBrick |
+| `src/backend/project.ts` | short read-only SQLite snapshots of the `.sb` project |
+| `src/backend/build.ts` | file watching, exports through `sb`, guarded accept/reject |
+| `src/backend/library.ts` | local LDraw zip lookup and MPD packing (no downloads) |
+| `src/viewport.ts`, `viewcube.tsx`, `panel.tsx` | the Three.js view and the Solid UI |
+
+Exports of the accepted model run `sb` without `--user`, so they are read-only. The panel's
+accept and reject clicks run as the person, with `SB_ALLOW_HUMAN`.
