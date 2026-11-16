@@ -7,7 +7,7 @@ leaving opencode.
 
 <!-- demo-video -->
 <p align="center">
-  <a href="https://github.com/levtechs/opencode-superbrick/blob/master/docs/superbrick-opencode-demo.mp4">
+  <a href="https://cdn.jsdelivr.net/gh/levtechs/opencode-superbrick@master/docs/superbrick-opencode-demo.mp4">
     <img src="docs/images/demo-poster.jpg" alt="Watch the SuperBrick + opencode demo" width="800">
   </a>
 </p>
