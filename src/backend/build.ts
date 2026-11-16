@@ -15,6 +15,8 @@ export interface BuildOptions {
   library: PartsLibrary;
   signal?: AbortSignal;
   pollMs?: number;
+  /** Called when the build connects itself to a project the agent created or opened. */
+  onBind?: (binding: Binding) => void;
 }
 
 export function decisionAllowed(state: BuildState, ids: readonly number[], revision: string, action: string): void {
@@ -46,6 +48,9 @@ export class Build {
   private known = new Map<string, Artifact>();
   private closed = false;
   private deciding = false;
+  /** .sb files the agent's tools mentioned, newest last; the first one that exists is connected automatically. */
+  private candidates: string[] = [];
+  private adopting = false;
 
   constructor(
     readonly scope: Scope,
@@ -142,6 +147,7 @@ export class Build {
     const generation = this.generation;
     const binding = { ...this.state.binding };
     const signal = AbortSignal.any([this.controller.signal, ...(this.options.signal ? [this.options.signal] : [])]);
+    if (!binding.project && this.candidates.length) void this.adopt();
     try {
       let project = emptyProject();
       if (binding.project) project = await readProject(binding.project, this.options.python, signal);
@@ -174,7 +180,8 @@ export class Build {
         // If the selected builder has no pending drafts, use the genuinely read-only human export.
         // Nonhuman direct export bypasses human_news, but first-visit observation setup may write.
         const hasDrafts = binding.view === "builder" && project.drafts.some((d) => d.user === binding.builder && d.state === "pending");
-        const args = [binding.project, "--user", hasDrafts ? binding.builder : "human", "export", "-o", modelPath, "--force"];
+        // Without --user, sb exports the stored accepted model read-only (no session, no human authority needed).
+        const args = [binding.project, ...(hasDrafts ? ["--user", binding.builder] : []), "export", "-o", modelPath, "--force"];
         await run(this.options.sb, args, { signal, timeout: 60_000 });
       }
       const sourceText = await readFile(modelPath, "utf8");
@@ -243,16 +250,42 @@ export class Build {
     if (info.isFile()) this.known.set(path, { path, kind, modified: info.mtimeMs });
   }
 
+  /** Connects to the newest mentioned project that exists, until a project is connected (by the agent or the user). */
+  private async adopt(): Promise<void> {
+    if (this.adopting || this.deciding || this.closed || this.state.binding.project) return;
+    this.adopting = true;
+    try {
+      for (const candidate of [...this.candidates].reverse()) {
+        try {
+          const project = await realpath(candidate);
+          if (!(await stat(project)).isFile() || this.state.binding.project) continue;
+          const folder = dirname(project);
+          const binding = { ...this.state.binding, project };
+          // The agent's working folder holds its renders and generated models; never adopt the whole workspace.
+          if (!binding.runDirectory && folder !== await realpath(this.scope.directory).catch(() => this.scope.directory)) binding.runDirectory = folder;
+          await this.configure(binding);
+          this.options.onBind?.(this.state.binding);
+          return;
+        } catch { /* Not created yet, or not a SuperBrick project: keep waiting. */ }
+      }
+    } finally { this.adopting = false; }
+  }
+
   async discover(paths: readonly string[]): Promise<void> {
     const before = JSON.stringify(this.state.artifacts);
     for (const path of paths.slice(0, 100)) {
       try {
         const absolute = path.startsWith("file:") ? fileURLToPath(path) : resolve(this.scope.directory, expandHome(path));
+        if (/\.sb$/i.test(absolute)) {
+          this.candidates = [...this.candidates.filter((c) => c !== absolute), absolute].slice(-20);
+          continue;
+        }
         await this.addArtifact(absolute);
       } catch { /* Tool paths are hints, not trusted file existence assertions. */ }
     }
     this.state.artifacts = [...this.known.values()].sort((a, b) => b.modified - a.modified).slice(0, 100);
     if (before !== JSON.stringify(this.state.artifacts)) this.changed();
+    if (!this.state.binding.project && this.candidates.length) void this.adopt();
   }
 
   async image(path: string): Promise<string> {
@@ -273,7 +306,9 @@ export class Build {
       const output = await run(this.options.sb, [
         this.state.binding.project, "--user", "human", "--no-images", "project",
         JSON.stringify({ action, ids: [...new Set(ids)], ...(action === "reject" ? { note: note.slice(0, 4_000) } : {}) }),
-      ], { signal: this.controller.signal, timeout: 60_000 });
+        // Only ever run for the person's own click in this panel; agents cannot reach decide(). sb refuses
+        // human authority from non-terminal callers unless the embedding app vouches for the person.
+      ], { signal: this.controller.signal, timeout: 60_000, env: { ...process.env, SB_ALLOW_HUMAN: "1" } });
       const reply = JSON.parse(output);
       if (!reply.ok) throw new Error(reply.text || `${action} failed`);
       return String(reply.text || "Decision saved");

@@ -28,7 +28,7 @@ export async function setupMain(ctx: MainContext): Promise<void> {
     let item = builds.get(scope.key);
     if (!item) {
       const windows = new Set<number>();
-      const build = new Build(scope, { ...store(scope).value }, { sb, python, library, signal: ctx.signal }, () => {
+      const build = new Build(scope, { ...store(scope).value }, { sb, python, library, signal: ctx.signal, onBind: (binding) => store(scope).set(binding) }, () => {
         for (const window of windows) provider.emit("updated", { key: scope.key }, window);
       });
       item = { build, windows };

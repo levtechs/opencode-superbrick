@@ -5,7 +5,8 @@ import { icon } from "./logo";
 import { defaultBinding, emptyProject, errorText } from "./model";
 import type { Activity, Artifact, Binding, BuildState, Draft, Preview, Scope } from "./model";
 import { styles } from "./styles";
-import { Viewport, type CameraState, type ViewName } from "./viewport";
+import { ViewCube } from "./viewcube";
+import { Viewport, type CameraState } from "./viewport";
 
 type Client = Pick<IpcClient<typeof Bridge.spec>, "watch" | "release" | "status" | "preview" | "configure" | "refresh" | "choose" | "open" | "decide" | "discover" | "image" | "on">;
 type DockTab = "agents" | "activity" | "artifacts" | "project";
@@ -15,7 +16,6 @@ const thumbCache = new Map<string, string>();
 const name = (path: string) => path.split(/[\\/]/).at(-1) || path;
 const time = (value: number) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const OPEN_STATES = ["pending", "stale", "blocked"];
-const VIEWS: [ViewName, string][] = [["front", "Front"], ["top", "Top"], ["right", "Right"], ["iso", "3D"]];
 
 /** Small isometric brick, used for model tiles. */
 const BrickGlyph = () => <svg viewBox="0 0 64 64" aria-hidden="true">
@@ -27,7 +27,7 @@ const BrickGlyph = () => <svg viewBox="0 0 64 64" aria-hidden="true">
 </svg>;
 /** egui_dock's tab close cross. */
 const Cross = () => <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.2" /></svg>;
-const Expand = () => <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4.5V1h3.5M7.5 1H11v3.5M11 7.5V11H7.5M4.5 11H1V7.5" fill="none" stroke="currentColor" stroke-width="1.3" /></svg>;
+const Chevron = (p: { down?: boolean }) => <svg viewBox="0 0 12 8" aria-hidden="true"><path d={p.down ? "M1.5 1.5 6 6l4.5-4.5" : "M1.5 6.5 6 2l4.5 4.5"} fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>;
 
 export function BuildUI(props: {
   bridge: Client;
@@ -48,7 +48,7 @@ export function BuildUI(props: {
   const [notice, setNotice] = createSignal("");
   const [form, setForm] = createSignal(defaultBinding());
   const [tab, setTab] = createSignal<DockTab>("agents");
-  const [settings, setSettings] = createSignal(false);
+  const [drawer, setDrawer] = createSignal(false);
   const [selected, setSelected] = createSignal<number[]>([]);
   const [bulk, setBulk] = createSignal<{ action: "accept" | "reject"; ids: number[]; revision: string }>();
   const [rejecting, setRejecting] = createSignal<number>();
@@ -64,11 +64,11 @@ export function BuildUI(props: {
   const [edges, setEdges] = createSignal(true);
   const [steps, setSteps] = createSignal(1);
   const [step, setStep] = createSignal(1);
-  const [dockHeight, setDockHeight] = createSignal(210);
+  const [dockHeight, setDockHeight] = createSignal(230);
   const [dragging, setDragging] = createSignal(false);
-  const [focus, setFocus] = createSignal(false);
   const [viewportVersion, setViewportVersion] = createSignal(0);
   let root!: HTMLElement;
+  let cubeUpdate: ((view: ArrayLike<number>) => void) | undefined;
   let canvas!: HTMLDivElement;
   let viewport: Viewport | undefined;
   let reload: (() => Promise<void>) | undefined;
@@ -89,8 +89,7 @@ export function BuildUI(props: {
   const locked = () => working() || project().editorOpen || !props.local();
   const field = (key: keyof Binding, value: string) => setForm((current) => ({ ...current, [key]: value }));
   const current = (key: string) => session().key === key;
-  const showTab = (next: DockTab) => { setTab(next); if (next === "project") setSettings(true); };
-  const closeSettings = () => { setSettings(false); if (tab() === "project") setTab("agents"); };
+  const showTab = (next: DockTab) => { setTab(next); setDrawer(true); };
 
   onMount(() => setMounted(true));
 
@@ -116,12 +115,11 @@ export function BuildUI(props: {
           : await props.bridge.status(scope, { signal: controller.signal });
         if (controller.signal.aborted || !current(scope.key)) return;
         const next = JSON.parse(json) as BuildState;
+        const before = state().binding;
         setState(next);
-        if (first) {
-          setForm({ ...next.binding });
-          if (!next.binding.project && !next.binding.generated) showTab("project");
-          first = false;
-        }
+        // Keep the Project form in step when the backend connects itself to the agent's project.
+        if (first || before.project !== next.binding.project || before.runDirectory !== next.binding.runDirectory) setForm({ ...next.binding });
+        first = false;
         if (next.previewRevision !== lastPreview) {
           const raw = await props.bridge.preview(scope, { signal: controller.signal });
           if (controller.signal.aborted || !current(scope.key)) return;
@@ -169,6 +167,7 @@ export function BuildUI(props: {
         if (cameras.size > 80) cameras.delete(cameras.keys().next().value!);
       }, cameras.get(key));
       viewport = view;
+      view.onFrame = (matrix) => cubeUpdate?.(matrix);
       setOrtho(view.ortho);
       view.showEdges(untrack(edges));
       setViewportVersion((version) => version + 1);
@@ -221,20 +220,6 @@ export function BuildUI(props: {
     if (!notice()) return;
     const timer = setTimeout(() => setNotice(""), 8_000);
     onCleanup(() => clearTimeout(timer));
-  });
-
-  // Focus mode: only the build. Esc leaves it (the browser handles Esc for real full screen first).
-  createEffect(() => {
-    if (!focus()) return;
-    const key = (event: KeyboardEvent) => { if (event.key === "Escape" && !document.fullscreenElement) setFocus(false); };
-    const change = () => { if (!document.fullscreenElement) root.classList.remove("fullscreen"); };
-    window.addEventListener("keydown", key);
-    document.addEventListener("fullscreenchange", change);
-    onCleanup(() => {
-      window.removeEventListener("keydown", key);
-      document.removeEventListener("fullscreenchange", change);
-      if (document.fullscreenElement === root) void document.exitFullscreen().catch(() => {});
-    });
   });
 
   const act = async (action: () => Promise<void>) => {
@@ -298,10 +283,6 @@ export function BuildUI(props: {
   const scrub = (value: number) => { setStep(value); viewport?.setStep(value); };
   const toggleOrtho = (on: boolean) => { setOrtho(on); viewport?.setOrtho(on); };
   const toggleEdges = (on: boolean) => { setEdges(on); viewport?.showEdges(on); };
-  const fullscreen = () => {
-    if (document.fullscreenElement === root) { void document.exitFullscreen().catch(() => {}); return; }
-    root.requestFullscreen?.().then(() => root.classList.add("fullscreen")).catch(() => {});
-  };
   const startDrag = (event: PointerEvent) => {
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
@@ -323,16 +304,8 @@ export function BuildUI(props: {
     target.addEventListener("pointercancel", up);
   };
 
-  const docTitle = () => {
-    const b = binding();
-    if (b.view === "generated") return b.generated ? name(b.generated) : "Generated";
-    return b.project ? name(b.project) : "No project";
-  };
-  const busyText = () => state().busy ? "Exporting…" : rendering() ? "Rendering…" : working() ? "Working…" : "";
-
   const StepSlider = () => <Show when={steps() > 1}>
     <span class="sb-step">
-      <span class="weak">Step</span>
       <input type="range" min="1" max={steps()} value={step()} aria-label="Building step" onInput={(e) => scrub(Number(e.currentTarget.value))} />
       <span class="mono">{step()}/{steps()}</span>
     </span>
@@ -371,207 +344,190 @@ export function BuildUI(props: {
     </>;
   };
 
-  return <section class="sb" classList={{ focus: focus() }} ref={root} aria-label="SuperBrick build companion">
+  const busy = () => state().busy || rendering() || working();
+  const running = () => activity().some((a) => a.status === "running") || props.background().length > 0;
+  const Tab = (p: { id: DockTab; label: string; extra?: any }) =>
+    <button class="sb-tab" role="tab" aria-selected={tab() === p.id} onClick={() => setTab(p.id)}>{p.label}{p.extra}</button>;
+
+  return <section class="sb" ref={root} aria-label="SuperBrick build companion">
     <style>{styles}</style>
 
-    {/* Toolbar — SuperBrick's top bar */}
-    <div class="sb-menubar">
-      <span class="sb-brand"><img src={icon} alt="" /><span>SuperBrick</span></span>
-      <span class="sep" />
-      <span class="sb-seg" role="radiogroup" aria-label="Model shown">
-        <button classList={{ on: binding().view === "builder" }} aria-pressed={binding().view === "builder"} disabled={working()} title="Accepted model plus this builder's open proposals" onClick={() => switchView("builder")}>
-          {project().builders.length > 1 ? "Builder" : `Builder · ${binding().builder}`}
-        </button>
-        <Show when={project().builders.length > 1}>
-          <select aria-label="Builder" value={binding().builder} disabled={working()} onChange={(e) => switchView("builder", e.currentTarget.value)}>
-            <For each={[...new Set([binding().builder, ...project().builders])]}>{(b) => <option value={b}>{b}</option>}</For>
-          </select>
-        </Show>
-        <button classList={{ on: binding().view === "accepted" }} aria-pressed={binding().view === "accepted"} disabled={working()} title="Only accepted geometry" onClick={() => switchView("accepted")}>Accepted</button>
-        <button classList={{ on: binding().view === "generated" }} aria-pressed={binding().view === "generated"} disabled={working()} title="A generated LDraw file (not proposed)" onClick={() => switchView("generated")}>Generated</button>
-      </span>
-      <span class="grow" />
-      <button disabled={!binding().project || working()} title="Open this project in the SuperBrick app" onClick={() => void act(async () => { await props.bridge.open(session()); })}>Open in app</button>
-      <button classList={{ on: settings() && tab() === "project" }} title="Project settings" onClick={() => settings() && tab() === "project" ? closeSettings() : showTab("project")}>Project</button>
-    </div>
+    {/* The build, full bleed */}
+    <div class="sb-stage">
+      <div class="sb-canvas" ref={canvas} />
 
-    <Show when={!props.local()}><div class="sb-banner"><span class="grow">This companion needs the desktop's local server; remote paths aren't readable here.</span></div></Show>
-    <Show when={error() || state().error}><div class="sb-banner err" role="alert"><span class="grow">{error() || state().error}{preview() ? " (showing the last good preview)" : ""}</span><button class="small frameless" aria-label="Dismiss" onClick={() => setError("")}><Cross /></button></div></Show>
+      <Show when={!preview()}>
+        <div class="sb-empty">
+          <img src={icon} alt="" />
+          <Show when={props.local()} fallback={<div class="weak">Needs the desktop app's local server.</div>}>
+            <div class="title">{binding().project || binding().generated ? "Loading the build…" : "Waiting for the agent…"}</div>
+            <Show when={!binding().project && !binding().generated}>
+              <div class="weak">Connects by itself when the agent opens or creates a .sb project.</div>
+              <button class="link" onClick={() => showTab("project")}>Choose a project instead</button>
+            </Show>
+          </Show>
+        </div>
+      </Show>
 
-    {/* Viewport area — document tab, view toolbar, canvas */}
-    <div class="sb-area sb-main">
-      <div class="sb-tabs" role="tablist" aria-label="Document">
-        <span class="sb-tab" role="tab" aria-selected="true" title={binding().view === "generated" ? binding().generated : binding().project}>{docTitle()}</span>
-      </div>
-      <div class="sb-viewbar">
-        <button disabled={!preview()} title="Fit (F)" onClick={() => viewport?.fit()}>Fit</button>
-        <For each={VIEWS}>{([id, label]) => <button disabled={!preview()} onClick={() => viewport?.view(id)}>{label}</button>}</For>
+      <div class="sb-hud tl">
+        <button disabled={!binding().project || working()} title="Open this project in the SuperBrick app" onClick={() => void act(async () => { await props.bridge.open(session()); })}>Open in app</button>
         <label class="check"><input type="checkbox" checked={ortho()} onChange={(e) => toggleOrtho(e.currentTarget.checked)} />Ortho</label>
         <label class="check"><input type="checkbox" checked={edges()} onChange={(e) => toggleEdges(e.currentTarget.checked)} />Edges</label>
-        <StepSlider />
-        <button class="icon" classList={{ push: steps() <= 1 }} title="Focus on the build (Esc to exit)" aria-label="Focus on the build" onClick={() => setFocus(true)}><Expand /></button>
       </div>
-      <div class="sb-viewport">
-        <div class="sb-canvas" ref={canvas} />
-        <Show when={!preview()}>
-          <div class="sb-empty">
-            <img src={icon} alt="" />
-            <div class="title">{binding().project || binding().generated ? "Waiting for the first export…" : "No build connected"}</div>
-            <Show when={!binding().project && !binding().generated}><button onClick={() => showTab("project")}>Connect a project…</button></Show>
-          </div>
-        </Show>
-        <Show when={preview()}>
-          <div class="sb-overlay br">{preview()?.parts} pieces{steps() > 1 && step() < steps() ? ` · step ${step()}/${steps()}` : ""}</div>
-        </Show>
-        <Show when={rendering()}><div class="sb-overlay tl"><span class="sb-busy" /></div></Show>
-        <Show when={focus()}>
-          <div class="sb-float top">
-            <button disabled={!preview()} onClick={() => viewport?.fit()}>Fit</button>
-            <button title="Fill the whole screen" onClick={fullscreen}>Full screen</button>
-            <button class="icon" title="Exit (Esc)" aria-label="Exit focus" onClick={() => setFocus(false)}><Cross /></button>
-          </div>
-          <Show when={steps() > 1}><div class="sb-float bottom"><StepSlider /></div></Show>
-        </Show>
-      </div>
-      <Show when={renderError()}><div class="sb-banner err" role="alert"><span class="grow">{renderError()}</span></div></Show>
-      <Show when={preview()?.warnings.length}>
-        <details class="sb-banner"><summary>{preview()!.warnings.length} missing library parts</summary><For each={preview()!.warnings}>{(w) => <div class="mono">{w}</div>}</For></details>
+
+      <Show when={preview()}>
+        <ViewCube register={(update) => (cubeUpdate = update)} onView={(v) => viewport?.view(v)} onOrbit={(dx, dy, done) => viewport?.orbit(dx, dy, done)} />
+        <div class="sb-hud br">
+          <StepSlider />
+          <span class="count">{preview()?.parts} pieces</span>
+          <Show when={busy()}><span class="sb-busy" title={state().busy ? "Exporting…" : "Rendering…"} /></Show>
+        </div>
       </Show>
+
+      <Show when={error() || state().error || renderError()}>
+        <div class="sb-toast err" role="alert">
+          <span class="grow">{error() || state().error || renderError()}</span>
+          <button class="small frameless" aria-label="Dismiss" onClick={() => { setError(""); setRenderError(""); }}><Cross /></button>
+        </div>
+      </Show>
+      <Show when={notice()}><div class="sb-toast note" role="status">{notice()}</div></Show>
+
+      <button class="sb-pull" classList={{ open: drawer(), hot: pending().length > 0 }} aria-expanded={drawer()}
+        title={drawer() ? "Hide agents, activity and artifacts" : "Show agents, activity and artifacts"}
+        onClick={() => setDrawer(!drawer())}>
+        <Chevron down={drawer()} />
+        <Show when={!drawer() && open().length}><span class="badge">{open().length}</span></Show>
+        <Show when={!drawer() && running()}><span class="dot" /></Show>
+      </button>
     </div>
 
-    <div class={`sb-split ${dragging() ? "drag" : ""}`} role="separator" aria-orientation="horizontal" aria-label="Resize dock" onPointerDown={startDrag} />
-
-    {/* Dock — egui_dock tabs */}
-    <div class="sb-area sb-dock" style={{ height: `${dockHeight()}px` }}>
-      <div class="sb-tabs" role="tablist" aria-label="Build details">
-        <button class="sb-tab" role="tab" aria-selected={tab() === "agents"} onClick={() => setTab("agents")}>Agents<Show when={open().length}><span class={`count ${pending().length ? "hot" : ""}`}>{open().length}</span></Show></button>
-        <button class="sb-tab" role="tab" aria-selected={tab() === "activity"} onClick={() => setTab("activity")}>Activity<Show when={activity().some((a) => a.status === "running")}><span class="sb-busy" /></Show></button>
-        <button class="sb-tab" role="tab" aria-selected={tab() === "artifacts"} onClick={() => setTab("artifacts")}>Artifacts</button>
-        <Show when={settings()}>
-          <span class="sb-tab closable" role="tab" aria-selected={tab() === "project"} onClick={() => setTab("project")}>Project
-            <button class="x" aria-label="Close project settings" onClick={(e) => { e.stopPropagation(); closeSettings(); }}><Cross /></button>
-          </span>
-        </Show>
-      </div>
-      <div class="sb-body" role="tabpanel">
-        <Show when={lightbox()}>{(value) => <div class="sb-lightbox" onClick={() => setLightbox(undefined)}>
-          <div class="sb-row"><span class="grow mono">{value().path}</span><button class="small" onClick={() => setLightbox(undefined)}>Close</button></div>
-          <img src={value().data} alt={`Build artifact: ${name(value().path)}`} />
-        </div>}</Show>
-
-        <Show when={tab() === "agents"}>
-          <Show when={project().editorOpen}><p class="sb-hint">Open in the SuperBrick app — close it there to accept or reject here.</p></Show>
-          <Show when={!project().drafts.length}>
-            <p class="weak">No proposals yet.</p>
-            <p class="sb-hint">Agents propose with <code>sb mcp --user NAME</code>. Nothing lands until you accept it.</p>
-          </Show>
-          <Show when={open().length > 1}>
-            <label class="check sb-all"><input type="checkbox" checked={selected().length > 0 && selected().length === open().length}
-              onChange={(e) => setSelected(e.currentTarget.checked ? open().map((d) => d.id) : [])} /><span class="weak">{open().length} open</span></label>
-          </Show>
-          <For each={open()}>{(draft) => <DraftRow draft={draft} />}</For>
-          <Show when={selected().length && !bulk()}>
-            <div class="sb-row sb-bulk">
-              <span class="weak">{selected().length} checked</span>
-              <button class="small frameless" onClick={() => setSelected([])}>Clear</button>
-              <span class="grow" />
-              <button disabled={locked()} onClick={() => { setNote(""); setRejecting(undefined); setBulk({ action: "reject", ids: [...selected()], revision: project().revision }); }}>Reject…</button>
-              <button class="on" disabled={locked() || !selected().every((id) => pending().some((d) => d.id === id))} onClick={() => { setRejecting(undefined); setBulk({ action: "accept", ids: [...selected()], revision: project().revision }); }}>Accept</button>
-            </div>
-          </Show>
-          <Show when={bulk()}>{(request) => <div class="sb-confirm">
-            <div class="strong">{request().action === "accept" ? "Accept" : "Reject"} {request().ids.map((id) => `#${id}`).join(", ")}?</div>
-            <Show when={request().action === "reject"}><textarea placeholder="Optional feedback for the builder" value={note()} onInput={(e) => setNote(e.currentTarget.value)} /></Show>
-            <Show when={request().revision !== project().revision}><div class="sb-sub warn">The project changed since you checked these. Review and try again.</div></Show>
-            <div class="sb-row">
-              <button class={request().action === "accept" ? "on" : "danger"} disabled={locked() || request().revision !== project().revision} onClick={() => void decide(request().action, request().ids, request().revision, note())}>{request().action === "accept" ? "Accept" : "Reject"}</button>
-              <button onClick={() => setBulk(undefined)}>Cancel</button>
-            </div>
+    {/* Drawer: agents, activity, artifacts, project */}
+    <Show when={drawer()}>
+      <div class={`sb-drawer ${dragging() ? "drag" : ""}`} style={{ height: `${dockHeight()}px` }}>
+        <div class="sb-grip" role="separator" aria-orientation="horizontal" aria-label="Resize" onPointerDown={startDrag} />
+        <div class="sb-tabs" role="tablist" aria-label="Build details">
+          <Tab id="agents" label="Agents" extra={<Show when={open().length}><span class={`count ${pending().length ? "hot" : ""}`}>{open().length}</span></Show>} />
+          <Tab id="activity" label="Activity" extra={<Show when={running()}><span class="sb-busy" /></Show>} />
+          <Tab id="artifacts" label="Artifacts" />
+          <Tab id="project" label="Project" />
+        </div>
+        <div class="sb-body" role="tabpanel">
+          <Show when={lightbox()}>{(value) => <div class="sb-lightbox" onClick={() => setLightbox(undefined)}>
+            <div class="sb-row"><span class="grow mono">{value().path}</span><button class="small" onClick={() => setLightbox(undefined)}>Close</button></div>
+            <img src={value().data} alt={`Build artifact: ${name(value().path)}`} />
           </div>}</Show>
-          <Show when={recent().length}>
-            <button class={`sb-collapse ${showRecent() ? "open" : ""}`} onClick={() => setShowRecent(!showRecent())}><span class="tri" />Recent<span class="faint">{recent().length}</span></button>
-            <Show when={showRecent()}><div class="sb-indent"><For each={recent()}>{(draft) => <DraftRow draft={draft} />}</For></div></Show>
+
+          <Show when={tab() === "agents"}>
+            <Show when={project().editorOpen}><p class="sb-hint">Open in the SuperBrick app — close it there to accept or reject here.</p></Show>
+            <Show when={!project().drafts.length}><p class="weak">No proposals yet.</p></Show>
+            <Show when={open().length > 1}>
+              <label class="check sb-all"><input type="checkbox" checked={selected().length > 0 && selected().length === open().length}
+                onChange={(e) => setSelected(e.currentTarget.checked ? open().map((d) => d.id) : [])} /><span class="weak">{open().length} open</span></label>
+            </Show>
+            <For each={open()}>{(draft) => <DraftRow draft={draft} />}</For>
+            <Show when={selected().length && !bulk()}>
+              <div class="sb-row sb-bulk">
+                <span class="weak">{selected().length} checked</span>
+                <button class="small frameless" onClick={() => setSelected([])}>Clear</button>
+                <span class="grow" />
+                <button disabled={locked()} onClick={() => { setNote(""); setRejecting(undefined); setBulk({ action: "reject", ids: [...selected()], revision: project().revision }); }}>Reject…</button>
+                <button class="on" disabled={locked() || !selected().every((id) => pending().some((d) => d.id === id))} onClick={() => { setRejecting(undefined); setBulk({ action: "accept", ids: [...selected()], revision: project().revision }); }}>Accept</button>
+              </div>
+            </Show>
+            <Show when={bulk()}>{(request) => <div class="sb-confirm">
+              <div class="strong">{request().action === "accept" ? "Accept" : "Reject"} {request().ids.map((id) => `#${id}`).join(", ")}?</div>
+              <Show when={request().action === "reject"}><textarea placeholder="Optional feedback for the builder" value={note()} onInput={(e) => setNote(e.currentTarget.value)} /></Show>
+              <Show when={request().revision !== project().revision}><div class="sb-sub warn">The project changed since you checked these. Review and try again.</div></Show>
+              <div class="sb-row">
+                <button class={request().action === "accept" ? "on" : "danger"} disabled={locked() || request().revision !== project().revision} onClick={() => void decide(request().action, request().ids, request().revision, note())}>{request().action === "accept" ? "Accept" : "Reject"}</button>
+                <button onClick={() => setBulk(undefined)}>Cancel</button>
+              </div>
+            </div>}</Show>
+            <Show when={recent().length}>
+              <button class={`sb-collapse ${showRecent() ? "open" : ""}`} onClick={() => setShowRecent(!showRecent())}><span class="tri" />Recent<span class="faint">{recent().length}</span></button>
+              <Show when={showRecent()}><div class="sb-indent"><For each={recent()}>{(draft) => <DraftRow draft={draft} />}</For></div></Show>
+            </Show>
           </Show>
-        </Show>
 
-        <Show when={tab() === "activity"}>
-          <Show when={activityError()}><p class="sb-sub warn">{activityError()}</p></Show>
-          <For each={props.background()}>{(task) => <div class="sb-row"><span class="sb-busy" /><span>{task}</span></div>}</For>
-          <Show when={!activity().length}><p class="weak">Waiting for the agent's next tool call…</p></Show>
-          <div class="sb-log">
-            <For each={[...activity()].reverse()}>{(entry) => <>
-              <span class="t">{time(entry.started)}</span>
-              <span class="tool"><span class={`dot ${entry.status}`} />{entry.tool}</span>
-              <span class="what" title={entry.summary}>{entry.summary}<span class="faint">{entry.ended ? ` · ${((entry.ended - entry.started) / 1_000).toFixed(1)}s` : ""}</span></span>
-              <Show when={entry.detail || entry.images.length}>
-                <div class="extra">
-                  <Show when={entry.detail}><div class="err">{entry.detail}</div></Show>
-                  <For each={entry.images}>{(src) => <img src={src} alt="Tool result — an attempt or diagnostic, not necessarily accepted geometry" />}</For>
-                </div>
-              </Show>
-            </>}</For>
-          </div>
-        </Show>
+          <Show when={tab() === "activity"}>
+            <Show when={activityError()}><p class="sb-sub warn">{activityError()}</p></Show>
+            <For each={props.background()}>{(task) => <div class="sb-row"><span class="sb-busy" /><span>{task}</span></div>}</For>
+            <Show when={!activity().length}><p class="weak">Waiting for the agent's next tool call…</p></Show>
+            <div class="sb-log">
+              <For each={[...activity()].reverse()}>{(entry) => <>
+                <span class="t">{time(entry.started)}</span>
+                <span class="tool"><span class={`dot ${entry.status}`} />{entry.tool}</span>
+                <span class="what" title={entry.summary}>{entry.summary}<span class="faint">{entry.ended ? ` · ${((entry.ended - entry.started) / 1_000).toFixed(1)}s` : ""}</span></span>
+                <Show when={entry.detail || entry.images.length}>
+                  <div class="extra">
+                    <Show when={entry.detail}><div class="err">{entry.detail}</div></Show>
+                    <For each={entry.images}>{(src) => <img src={src} alt="Tool result — an attempt or diagnostic, not necessarily accepted geometry" />}</For>
+                  </div>
+                </Show>
+              </>}</For>
+            </div>
+          </Show>
 
-        <Show when={tab() === "artifacts"}>
-          <Show when={!state().artifacts.length}><p class="weak">No renders or models yet.</p><p class="sb-hint">Set a run folder under Project to collect generator output.</p></Show>
-          <div class="sb-grid">
-            <For each={[...state().artifacts].sort((a, b) => b.modified - a.modified)}>{(artifact) => {
-              const active = () => artifact.kind === "model" && binding().view === "generated" && binding().generated === artifact.path;
-              return <button class={`sb-tile ${active() ? "active" : ""}`} disabled={working()}
-                title={`${artifact.path}\n${time(artifact.modified)}\n${artifact.kind === "model" ? "Click to view (generated, not proposed)" : "Click to enlarge"}`}
-                onClick={() => artifact.kind === "image" ? showImage(artifact.path, artifact.modified) : follow(artifact)}>
-                <div class="sb-thumb">
-                  <Show when={artifact.kind === "image"} fallback={<BrickGlyph />}>
-                    <Show when={thumbs()[`${artifact.path}@${artifact.modified}`]}>
-                      <img src={thumbs()[`${artifact.path}@${artifact.modified}`]} alt="" />
+          <Show when={tab() === "artifacts"}>
+            <Show when={!state().artifacts.length}><p class="weak">No renders or models yet.</p></Show>
+            <div class="sb-grid">
+              <For each={[...state().artifacts].sort((a, b) => b.modified - a.modified)}>{(artifact) => {
+                const active = () => artifact.kind === "model" && binding().view === "generated" && binding().generated === artifact.path;
+                return <button class={`sb-tile ${active() ? "active" : ""}`} disabled={working()}
+                  title={`${artifact.path}\n${time(artifact.modified)}\n${artifact.kind === "model" ? "Click to view (generated, not proposed)" : "Click to enlarge"}`}
+                  onClick={() => artifact.kind === "image" ? showImage(artifact.path, artifact.modified) : follow(artifact)}>
+                  <div class="sb-thumb">
+                    <Show when={artifact.kind === "image"} fallback={<BrickGlyph />}>
+                      <Show when={thumbs()[`${artifact.path}@${artifact.modified}`]}>
+                        <img src={thumbs()[`${artifact.path}@${artifact.modified}`]} alt="" />
+                      </Show>
                     </Show>
-                  </Show>
-                </div>
-                <div class="name"><span>{name(artifact.path)}</span></div>
-              </button>;
-            }}</For>
-          </div>
-        </Show>
+                  </div>
+                  <div class="name"><span>{name(artifact.path)}</span></div>
+                </button>;
+              }}</For>
+            </div>
+          </Show>
 
-        <Show when={tab() === "project"}>
-          <form class="sb-form" onSubmit={(event) => { event.preventDefault(); void act(async () => { await configure(form()); if (form().project || form().generated) closeSettings(); }); }}>
-            <label for="sb-project">Project</label>
-            <input id="sb-project" type="text" placeholder="/path/to/build.sb" value={form().project} onInput={(e) => field("project", e.currentTarget.value)} />
-            <button type="button" onClick={() => void choose("project")}>Browse…</button>
-            <label for="sb-builder" title="The agent's sb --user name">Builder</label>
-            <input id="sb-builder" type="text" list="sb-builders" value={form().builder} onInput={(e) => field("builder", e.currentTarget.value)} />
-            <datalist id="sb-builders"><For each={project().builders}>{(b) => <option value={b} />}</For></datalist>
-            <span />
-            <label for="sb-run">Run folder</label>
-            <input id="sb-run" type="text" placeholder="Optional — watch renders and generated models" value={form().runDirectory} onInput={(e) => field("runDirectory", e.currentTarget.value)} />
-            <button type="button" onClick={() => void choose("directory")}>Browse…</button>
-            <label for="sb-generated">Generated</label>
-            <input id="sb-generated" type="text" placeholder="Optional .ldr/.mpd (default: newest in run folder)" value={form().generated} onInput={(e) => field("generated", e.currentTarget.value)} />
-            <button type="button" onClick={() => void choose("model")}>Browse…</button>
-            <span />
-            <span class="sb-row">
-              <button class="on" disabled={working() || !props.local()}>Connect</button>
-              <button type="button" onClick={() => setForm({ ...binding() })}>Revert</button>
-              <span class="grow" />
-              <button type="button" disabled={!props.local() || working()} title="Re-export and reload the preview" onClick={() => void act(async () => { await props.bridge.refresh(session()); })}>Re-export</button>
-            </span>
-            <span />
-          </form>
-          <p class="sb-hint">{project().revision ? `Revision ${project().revision.slice(0, 12)}` : ""}{project().builders.length ? ` · builders: ${project().builders.join(", ")}` : ""}</p>
-        </Show>
+          <Show when={tab() === "project"}>
+            <div class="sb-form">
+              <label>Show</label>
+              <span class="sb-seg" role="radiogroup" aria-label="Model shown">
+                <button classList={{ on: binding().view === "builder" }} aria-pressed={binding().view === "builder"} disabled={working()} title="Accepted model plus this builder's open proposals" onClick={() => switchView("builder")}>Proposals</button>
+                <button classList={{ on: binding().view === "accepted" }} aria-pressed={binding().view === "accepted"} disabled={working()} title="Only accepted geometry" onClick={() => switchView("accepted")}>Accepted</button>
+                <button classList={{ on: binding().view === "generated" }} aria-pressed={binding().view === "generated"} disabled={working()} title="A generated LDraw file (not proposed)" onClick={() => switchView("generated")}>Generated</button>
+              </span>
+              <span />
+            </div>
+            <form class="sb-form" onSubmit={(event) => { event.preventDefault(); void act(() => configure(form())); }}>
+              <label for="sb-project">Project</label>
+              <input id="sb-project" type="text" placeholder="/path/to/build.sb" value={form().project} onInput={(e) => field("project", e.currentTarget.value)} />
+              <button type="button" onClick={() => void choose("project")}>Browse…</button>
+              <label for="sb-builder" title="The agent's sb --user name">Builder</label>
+              <input id="sb-builder" type="text" list="sb-builders" value={form().builder} onInput={(e) => field("builder", e.currentTarget.value)} />
+              <datalist id="sb-builders"><For each={project().builders}>{(b) => <option value={b} />}</For></datalist>
+              <span />
+              <label for="sb-run">Run folder</label>
+              <input id="sb-run" type="text" placeholder="Optional — watch renders and generated models" value={form().runDirectory} onInput={(e) => field("runDirectory", e.currentTarget.value)} />
+              <button type="button" onClick={() => void choose("directory")}>Browse…</button>
+              <label for="sb-generated">Generated</label>
+              <input id="sb-generated" type="text" placeholder="Optional .ldr/.mpd (default: newest in run folder)" value={form().generated} onInput={(e) => field("generated", e.currentTarget.value)} />
+              <button type="button" onClick={() => void choose("model")}>Browse…</button>
+              <span />
+              <span class="sb-row">
+                <button class="on" disabled={working() || !props.local()}>Connect</button>
+                <button type="button" onClick={() => setForm({ ...binding() })}>Revert</button>
+                <span class="grow" />
+                <button type="button" disabled={!props.local() || working()} title="Re-export and reload the preview" onClick={() => void act(async () => { await props.bridge.refresh(session()); })}>Re-export</button>
+              </span>
+              <span />
+            </form>
+            <Show when={preview()?.warnings.length}>
+              <details class="sb-sub warn"><summary>{preview()!.warnings.length} missing library parts</summary><For each={preview()!.warnings}>{(w) => <div class="mono">{w}</div>}</For></details>
+            </Show>
+          </Show>
+        </div>
       </div>
-    </div>
-
-    {/* Status bar */}
-    <div class="sb-status">
-      <span>{binding().project ? name(binding().project) : "no project"}</span>
-      <span>{preview() ? `${preview()!.parts} source pieces` : "no preview"}</span>
-      <span>{open().length} open proposals</span>
-      <Show when={project().editorOpen}><span class="weak">open in app · read-only</span></Show>
-      <Show when={notice()}><span class="note" role="status">{notice()}</span></Show>
-      <span class="grow" />
-      <Show when={busyText()}><span class="weak" aria-live="polite"><span class="sb-busy" /> {busyText()}</span></Show>
-    </div>
+    </Show>
   </section>;
 }

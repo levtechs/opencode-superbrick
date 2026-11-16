@@ -1,13 +1,13 @@
 import {
   AmbientLight, Box3, Color, DirectionalLight, DoubleSide, Group, LoadingManager, Material, Mesh,
-  Object3D, OrthographicCamera, PerspectiveCamera, PlaneGeometry, Scene, ShaderMaterial, Vector3, WebGLRenderer,
+  Object3D, OrthographicCamera, PerspectiveCamera, PlaneGeometry, Quaternion, Scene, ShaderMaterial, Spherical, Vector3, WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { LDrawLoader } from "three/addons/loaders/LDrawLoader.js";
 import { LDrawConditionalLineMaterial } from "three/addons/materials/LDrawConditionalLineMaterial.js";
 
 export interface CameraState { position: number[]; target: number[]; ortho?: boolean; zoom?: number }
-export type ViewName = "front" | "top" | "right" | "iso";
+export type ViewName = "front" | "back" | "left" | "right" | "top" | "bottom" | "iso";
 
 /** SuperBrick's dark viewport colour. */
 export const VIEWPORT_BG = "#252a2e";
@@ -62,6 +62,9 @@ export class Viewport {
   private hasCamera = false;
   private steps = 1;
   private step = Infinity;
+  private tween = 0;
+  /** Called after every frame with the camera's view matrix (column-major), for the view cube. */
+  onFrame?: (view: ArrayLike<number>) => void;
 
   constructor(
     private host: HTMLElement,
@@ -103,6 +106,7 @@ export class Viewport {
     this.controls.screenSpacePanning = true;
     this.controls.zoomToCursor = true;
     if (target) this.controls.target.copy(target);
+    this.controls.addEventListener("start", () => { cancelAnimationFrame(this.tween); this.tween = 0; });
     this.controls.addEventListener("change", () => this.draw());
     this.controls.addEventListener("end", () => this.saved(this.cameraState()));
     this.controls.update();
@@ -215,20 +219,27 @@ export class Viewport {
     });
   }
 
-  fit(): void {
+  private framing(): { center: Vector3; distance: number } | undefined {
     if (!this.group) return;
     const box = new Box3().setFromObject(this.group);
     if (box.isEmpty()) return;
     const center = box.getCenter(new Vector3());
     const radius = Math.max(box.getSize(new Vector3()).length() / 2, 20);
-    const direction = this.camera.position.clone().sub(this.controls.target).normalize();
-    if (!direction.lengthSq()) direction.set(0.57, 0.47, 0.82).normalize();
     const distance = radius / Math.sin(this.perspective.fov * Math.PI / 360) * Math.max(1, 1 / this.perspective.aspect) * 1.1;
-    this.camera.position.copy(center).addScaledVector(direction, distance);
     this.perspective.near = Math.max(0.1, radius / 10_000);
     this.perspective.far = Math.max(100_000, distance + radius * 100);
     this.perspective.updateProjectionMatrix();
-    this.controls.target.copy(center);
+    return { center, distance };
+  }
+
+  fit(): void {
+    const frame = this.framing();
+    if (!frame) return;
+    cancelAnimationFrame(this.tween); this.tween = 0;
+    const direction = this.camera.position.clone().sub(this.controls.target).normalize();
+    if (!direction.lengthSq()) direction.set(0.57, 0.47, 0.82).normalize();
+    this.camera.position.copy(frame.center).addScaledVector(direction, frame.distance);
+    this.controls.target.copy(frame.center);
     this.orthographic.zoom = 1;
     this.updateOrthoFrustum();
     this.controls.update();
@@ -237,17 +248,53 @@ export class Viewport {
     this.draw();
   }
 
+  /** Swings the camera to a named view and frames the model (SuperBrick's view cube). */
   view(kind: ViewName): void {
-    const distance = this.camera.position.distanceTo(this.controls.target) || 600;
     // Scene is LDraw rotated 180° about X: LDraw front (−Z) is +Z here, LDraw right (+X) stays +X.
-    const direction = kind === "front" ? new Vector3(0, 0.0001, 1)
-      : kind === "top" ? new Vector3(0, 1, 0.0001)
-        : kind === "right" ? new Vector3(1, 0.0001, 0)
-          : new Vector3(0.57, 0.47, 0.82); // SuperBrick "iso": yaw 35°, pitch 28°
-    this.camera.position.copy(this.controls.target).addScaledVector(direction.normalize(), distance);
+    const e = 0.0001;
+    const direction = {
+      front: new Vector3(0, e, 1), back: new Vector3(0, e, -1), right: new Vector3(1, e, 0), left: new Vector3(-1, e, 0),
+      top: new Vector3(0, 1, e), bottom: new Vector3(0, -1, e), iso: new Vector3(0.57, 0.47, 0.82),
+    }[kind].normalize();
+    const frame = this.framing();
+    const target = frame?.center ?? this.controls.target.clone();
+    const distance = frame?.distance ?? (this.camera.position.distanceTo(this.controls.target) || 600);
+    cancelAnimationFrame(this.tween);
+    const fromTarget = this.controls.target.clone();
+    const offset = this.camera.position.clone().sub(fromTarget);
+    const fromDistance = offset.length() || distance;
+    offset.normalize();
+    const turn = new Quaternion().setFromUnitVectors(offset, direction);
+    const fromZoom = this.orthographic.zoom;
+    const started = performance.now();
+    const tick = () => {
+      const t = Math.min(1, (performance.now() - started) / 320);
+      const k = 1 - (1 - t) ** 3;
+      const way = offset.clone().applyQuaternion(new Quaternion().slerp(turn, k));
+      this.controls.target.lerpVectors(fromTarget, target, k);
+      this.camera.position.copy(this.controls.target).addScaledVector(way, fromDistance + (distance - fromDistance) * k);
+      this.orthographic.zoom = fromZoom + (1 - fromZoom) * k;
+      this.updateOrthoFrustum();
+      this.controls.update();
+      this.draw();
+      if (t < 1) this.tween = requestAnimationFrame(tick);
+      else { this.tween = 0; this.hasCamera = true; this.saved(this.cameraState()); }
+    };
+    this.tween = requestAnimationFrame(tick);
+  }
+
+  /** Orbits around the target by a pointer drag (pixels), like dragging the view itself; for the view cube. */
+  orbit(dx: number, dy: number, done = false): void {
+    cancelAnimationFrame(this.tween); this.tween = 0;
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const sphere = new Spherical().setFromVector3(offset);
+    sphere.theta -= dx * 0.012;
+    sphere.phi = Math.min(Math.PI - 1e-3, Math.max(1e-3, sphere.phi - dy * 0.012));
+    this.camera.position.copy(this.controls.target).add(offset.setFromSpherical(sphere));
+    this.camera.lookAt(this.controls.target);
     this.controls.update();
-    this.saved(this.cameraState());
     this.draw();
+    if (done) { this.hasCamera = true; this.saved(this.cameraState()); }
   }
 
   showEdges(visible: boolean): void {
@@ -264,7 +311,9 @@ export class Viewport {
     if (this.closed || this.frame) return;
     this.frame = requestAnimationFrame(() => {
       this.frame = 0;
-      if (!this.closed) this.renderer.render(this.scene, this.camera);
+      if (this.closed) return;
+      this.renderer.render(this.scene, this.camera);
+      this.onFrame?.(this.camera.matrixWorldInverse.elements);
     });
   }
 
@@ -272,6 +321,7 @@ export class Viewport {
     this.closed = true;
     this.generation++;
     cancelAnimationFrame(this.frame);
+    cancelAnimationFrame(this.tween);
     this.observer.disconnect();
     this.controls.dispose();
     if (this.group) disposeObject(this.group);

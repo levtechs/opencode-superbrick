@@ -25,7 +25,8 @@ const model = [
   "1 1 0 -24 0 1 0 0 0 1 0 0 0 1 3001.dat",
 ].join("\n");
 await writeFile(join(directory, "base.ldr"), model);
-await run(sb, ["--new", project, "--import", join(directory, "base.ldr")]);
+// The temp fixture stands in for a person's own base model; sb treats a piped (non-terminal) import as an agent's draft.
+await run(sb, ["--new", project, "--import", join(directory, "base.ldr")], { env: { ...process.env, SB_ALLOW_HUMAN: "1" } });
 await run(sb, [project, "--user", "opencode", "--no-images", "edit", JSON.stringify({
   label: "Yellow roof course", step: true, ops: [{ op: "add", part: "3001.dat", color: 14, pos: [0, -48, 0] }],
 })]);

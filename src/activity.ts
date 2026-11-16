@@ -28,8 +28,10 @@ export function artifactPaths(value: unknown): string[] {
     if (typeof item === "string") {
       const text = item.slice(0, Math.min(budget, 24_000)).replace(/https?:\/\/[^\s"'<>]+/gi, "");
       budget -= text.length;
-      // Quoted paths may contain spaces; then unquoted path-shaped tokens.
-      for (const match of text.matchAll(/["']([^"'\n]+\.(?:ldr|mpd|png|jpe?g|webp))["']|((?:file:\/\/|\/|\.\/|~\/|[a-zA-Z0-9_-]+\/)[^\s"'<>`|;]*\.(?:ldr|mpd|png|jpe?g|webp))/gi)) {
+      // A whole field that is a path (a tool's {path:"house.sb"}), then quoted paths (may contain spaces), then path-shaped tokens.
+      const whole = text.trim();
+      if (whole.length < 1_024 && /^[^\s"'<>`|;]+\.(?:sb|ldr|mpd|png|jpe?g|webp)$/i.test(whole)) paths.add(whole);
+      for (const match of text.matchAll(/["']([^"'\n]+\.(?:sb|ldr|mpd|png|jpe?g|webp))["']|((?:file:\/\/|\/|\.\/|~\/|[a-zA-Z0-9_-]+\/)[^\s"'<>`|;]*\.(?:sb|ldr|mpd|png|jpe?g|webp))(?!\w)/gi)) {
         const path = match[1] || match[2];
         if (!/^https?:/i.test(path) && !path.includes("\0")) paths.add(path);
       }

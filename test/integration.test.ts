@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Build } from "../src/backend/build";
@@ -8,6 +8,9 @@ import { PartsLibrary } from "../src/backend/library";
 import { findBinary, findPython } from "../src/backend/project";
 import { run } from "../src/backend/process";
 import { defaultBinding } from "../src/model";
+
+// Fixtures stand in for a person's own base model; sb treats a piped (non-terminal) import as an agent's draft.
+const fixtureEnv = { ...process.env, SB_ALLOW_HUMAN: "1" };
 
 test("installed SuperBrick: drafts, accepted/builder preview, explicit decisions and generated refresh", { timeout: 120_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "superbrick-integration-"));
@@ -20,7 +23,7 @@ test("installed SuperBrick: drafts, accepted/builder preview, explicit decisions
   try {
     const base = join(directory, "base.ldr");
     await writeFile(base, "0 Fixture\n1 4 0 0 0 1 0 0 0 1 0 0 0 1 3001.dat\n");
-    await run(sb, ["--new", project, "--import", base], { timeout: 60_000 });
+    await run(sb, ["--new", project, "--import", base], { timeout: 60_000, env: fixtureEnv });
     const proposed = JSON.parse(await run(sb, [project, "--user", "opencode", "--no-images", "edit",
       JSON.stringify({ label: "Second brick", step: true, ops: [{ op: "add", part: "3001.dat", color: 14, pos: [0, -24, 0] }] }),
     ], { timeout: 60_000 }));
@@ -62,5 +65,38 @@ test("installed SuperBrick: drafts, accepted/builder preview, explicit decisions
     await build.close();
     library.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("connects by itself to the .sb project the agent creates", { timeout: 120_000 }, async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "superbrick-adopt-"));
+  const folder = join(workspace, "house");
+  const project = join(folder, "house.sb");
+  const sb = await findBinary();
+  const python = await findPython();
+  const library = new PartsLibrary();
+  const bound: string[] = [];
+  const build = new Build({ key: "local\nadopt", sessionID: "adopt", serverID: "local", directory: workspace },
+    defaultBinding(), { sb, python, library, onBind: (b) => bound.push(b.project) });
+  try {
+    // The agent mentions the project before it exists: keep waiting.
+    await build.discover(["house/house.sb"]);
+    await build.refresh();
+    assert.equal(build.state.binding.project, "");
+    await mkdir(folder);
+    const base = join(folder, "base.ldr");
+    await writeFile(base, "0 Fixture\n1 4 0 0 0 1 0 0 0 1 0 0 0 1 3001.dat\n");
+    await run(sb, ["--new", project, "--import", base], { timeout: 60_000, env: fixtureEnv });
+    await build.refresh();
+    for (let i = 0; i < 100 && !build.snapshot(); i++) await new Promise((done) => setTimeout(done, 100));
+    const canonical = await realpath(project);
+    assert.equal(build.state.binding.project, canonical);
+    assert.equal(build.state.binding.runDirectory, await realpath(folder), "follows the agent's working folder");
+    assert.deepEqual(bound, [canonical]);
+    assert.equal(build.snapshot()?.parts, 1);
+  } finally {
+    await build.close();
+    library.close();
+    await rm(workspace, { recursive: true, force: true });
   }
 });

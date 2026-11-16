@@ -29,6 +29,8 @@ test("builder identity and path safety", () => {
 test("activity paths, failures and descendant sessions are bounded and truthful", () => {
   assert.deepEqual(artifactPaths({ command: 'sb render "runs/my house/out.png" && cat runs/a.ldr', secret: "/secret.png" }), ["runs/my house/out.png", "runs/a.ldr"]);
   assert.deepEqual(artifactPaths("https://example.com/private/model.ldr"), []);
+  assert.deepEqual(artifactPaths({ action: "open", path: "house.sb", create: true }), ["house.sb"]);
+  assert.deepEqual(artifactPaths("see /tmp/a.sbx and ./b.sb."), ["./b.sb"]);
   assert.equal(concise({ label: "Wall clump", command: "huge script" }), "Wall clump");
   assert.ok(resultFailed({ content: '{"ok":false,"text":"collision"}' }));
   assert.ok(resultFailed({ metadata: { exitCode: 1 } }));
